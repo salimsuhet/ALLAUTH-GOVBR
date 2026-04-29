@@ -498,6 +498,29 @@ docker-compose restart django
 docker-compose logs -f django
 ```
 
+### `403 Forbidden` no callback do Acesso Cidadão ES
+
+O `response_mode = form_post` faz o AC-ES enviar um **POST externo** para o callback.
+O Django bloqueia esse POST com 403 via CSRF middleware se a view não estiver isenta.
+A `AcessoCidadaoCallbackView` já aplica `@csrf_exempt` internamente — confirme que
+está usando a versão corrigida do plugin (`git+https://github.com/salimsuhet/ALLAUTH-GOVBR.git`).
+
+Se o problema persistir com a versão correta, verifique se há um proxy reverso (nginx)
+que está bloqueando o POST antes de ele chegar ao Django.
+
+### `invalid_client` ao fazer login com Gov.br
+
+O Gov.br rejeita credenciais no corpo do POST e exige `Authorization: Basic` no token
+endpoint. O `GovBrOAuth2Adapter` já configura `basic_auth = True` automaticamente.
+Se ocorrer esse erro, confirme que o plugin está atualizado:
+
+```bash
+docker-compose exec django pip show allauth-govbr
+# Verifique a data do commit no campo Location ou atualize com:
+docker-compose build --no-cache django
+```
+
+
 ### Verificar variáveis de ambiente dentro do container
 
 ```bash

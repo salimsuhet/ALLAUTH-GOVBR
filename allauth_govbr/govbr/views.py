@@ -5,25 +5,26 @@ Views OAuth2 para o Gov.br com PKCE manual.
 
 PKCE (Proof Key for Code Exchange) é OBRIGATÓRIO no Gov.br e não é
 suportado nativamente pelo django-allauth 0.51.x, então é implementado
-aqui manualmente via sobrescrita do método login() e de um OAuth2Client
-customizado que usa Basic Auth no token endpoint.
+aqui via sobrescrita do método login() e de um OAuth2Client customizado.
 
-Correções aplicadas em relação à versão original:
-  - Bug 1: client.state é uma string CSRF, não um dict — PKCE agora é
-    injetado via extra_params em login() e token_params no cliente.
-  - Bug 2: Gov.br exige Authorization: Basic no token endpoint;
-    o allauth padrão envia credenciais no corpo do POST.
-  - Bug 3: URLs do adapter eram avaliadas na importação do módulo;
-    agora são propriedades avaliadas em tempo de execução.
+Notas de implementação:
+  - Basic Auth no token endpoint: resolvido via basic_auth = True no
+    adapter; o OAuth2Client 0.51.x já suporta isso nativamente com
+    requests.auth.HTTPBasicAuth.
+  - PKCE (code_verifier): o OAuth2Client 0.51.x não tem token_params,
+    então GovBrOAuth2Client adiciona um parâmetro code_verifier próprio.
+  - URLs do adapter: propriedades avaliadas em tempo de execução para
+    que alterações em settings sejam refletidas sem reiniciar o processo.
 """
 import base64
 import hashlib
 import logging
 import os
+from urllib.parse import parse_qsl
 
 import requests as _requests
 from allauth.socialaccount.models import SocialLogin
-from allauth.socialaccount.providers.oauth2.client import OAuth2Client
+from allauth.socialaccount.providers.oauth2.client import OAuth2Client, OAuth2Error
 from allauth.socialaccount.providers.oauth2.views import (
     OAuth2Adapter,
     OAuth2CallbackView,
@@ -45,24 +46,30 @@ def _govbr_base():
         settings,
         "GOVBR_SSO_BASE_URL",
         "https://sso.acesso.gov.br",
-        # Homologação: defina GOVBR_SSO_BASE_URL = "https://sso.staging.acesso.gov.br"
+        # Homologação: GOVBR_SSO_BASE_URL = "https://sso.staging.acesso.gov.br"
     )
 
 
 # ---------------------------------------------------------------------------
-# Cliente OAuth2 customizado — Basic Auth no token endpoint
+# Cliente OAuth2 customizado — adiciona code_verifier (PKCE)
 # ---------------------------------------------------------------------------
 
 class GovBrOAuth2Client(OAuth2Client):
     """
-    Subclasse de OAuth2Client que envia as credenciais do cliente via
-    Authorization: Basic no token endpoint, conforme exigido pelo Gov.br.
+    Estende OAuth2Client para incluir code_verifier no token endpoint.
 
-    O allauth padrão envia client_id/client_secret no corpo do POST
-    (parâmetros de formulário), mas o Gov.br rejeita essa forma e espera
-    o header HTTP Basic Auth — comportamento idêntico ao confirmado no
-    plugin de referência PHP (GovBrStrategy.php, linhas 34-36).
+    O OAuth2Client padrão do allauth 0.51.x não suporta PKCE (não há
+    campo token_params nem code_verifier). Este cliente adiciona esse
+    parâmetro ao POST de troca do código de autorização.
+
+    Basic Auth é tratado pelo próprio OAuth2Client quando basic_auth=True
+    (que é passado pelo adapter via get_client()). Não é necessário
+    reimplementar essa parte.
     """
+
+    def __init__(self, *args, code_verifier="", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.code_verifier = code_verifier
 
     def get_access_token(self, code):
         data = {
@@ -70,29 +77,46 @@ class GovBrOAuth2Client(OAuth2Client):
             "grant_type": "authorization_code",
             "code": code,
         }
-        if self.state:
-            data["state"] = self.state
 
-        # Injeta code_verifier (PKCE) se presente
-        data.update(self.token_params)
+        # Injeta code_verifier (PKCE) quando disponível
+        if self.code_verifier:
+            data["code_verifier"] = self.code_verifier
 
-        credentials = base64.b64encode(
-            f"{self.consumer_key}:{self.consumer_secret}".encode("ascii")
-        ).decode("ascii")
+        # Basic Auth: usa requests.auth.HTTPBasicAuth quando basic_auth=True
+        # (comportamento herdado do OAuth2Client padrão do allauth 0.51.x)
+        if self.basic_auth:
+            auth = _requests.auth.HTTPBasicAuth(self.consumer_key, self.consumer_secret)
+        else:
+            auth = None
+            data.update({
+                "client_id": self.consumer_key,
+                "client_secret": self.consumer_secret,
+            })
 
-        headers = {
-            "Authorization": f"Basic {credentials}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
+        self._strip_empty_keys(data)
 
         resp = _requests.post(
             self.access_token_url,
             data=data,
-            headers=headers,
+            headers=self.headers,
+            auth=auth,
             timeout=10,
         )
-        resp.raise_for_status()
-        return self.parse_token(resp.content)
+
+        access_token = None
+        if resp.status_code in [200, 201]:
+            if (
+                resp.headers["content-type"].split(";")[0] == "application/json"
+                or resp.text[:2] == '{"'
+            ):
+                access_token = resp.json()
+            else:
+                access_token = dict(parse_qsl(resp.text))
+
+        if not access_token or "access_token" not in access_token:
+            raise OAuth2Error("Error retrieving access token: %s" % resp.content)
+
+        return access_token
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +126,11 @@ class GovBrOAuth2Client(OAuth2Client):
 class GovBrOAuth2Adapter(OAuth2Adapter):
     provider_id = GovBrProvider.id
 
-    # URLs como propriedades para ler settings em tempo de execução (Bug 3)
+    # O OAuth2Client 0.51.x envia Authorization: Basic quando basic_auth=True.
+    # O Gov.br exige Basic Auth no token endpoint (não aceita credenciais no body).
+    basic_auth = True
+
+    # URLs como propriedades para ler settings em tempo de execução
     @property
     def access_token_url(self):
         return f"{_govbr_base()}/token"
@@ -141,15 +169,15 @@ class GovBrLoginView(OAuth2LoginView):
     Sobrescreve login() para injetar parâmetros PKCE na URL de autorização.
 
     Por que login() e não get_client()?
-    No allauth 0.51.x, get_client() é chamado ANTES de client.state ser
-    definido (client.state recebe o token CSRF string somente depois, em
-    OAuth2LoginView.login()). Tentar fazer client.state["chave"] = valor
-    dentro de get_client() resulta em TypeError porque client.state é None
-    nesse momento. A solução correta é sobrescrever login() inteiro.
+    No allauth 0.51.x, client.state é None quando get_client() é chamado
+    (recebe o token CSRF string somente depois, em OAuth2LoginView.login()).
+    Fazer client.state["chave"] = valor dentro de get_client() lança
+    TypeError. A solução é sobrescrever login() e passar os parâmetros
+    como extra_params para client.get_redirect_url().
     """
 
     def login(self, request, *args, **kwargs):
-        # Gera code_verifier aleatório (43-128 chars, URL-safe base64 sem padding)
+        # Gera code_verifier aleatório (43–128 chars, URL-safe base64 sem padding)
         verifier_bytes = os.urandom(40)
         code_verifier = (
             base64.urlsafe_b64encode(verifier_bytes).rstrip(b"=").decode("ascii")
@@ -178,9 +206,10 @@ class GovBrLoginView(OAuth2LoginView):
         )
 
     def get_client(self, request, app):
-        """Retorna GovBrOAuth2Client (Basic Auth no token endpoint)."""
-        callback_url = reverse(self.adapter.provider_id + "_callback")
-        callback_url = build_absolute_uri(request, callback_url)
+        """Retorna GovBrOAuth2Client sem code_verifier (usado só no login)."""
+        callback_url = build_absolute_uri(
+            request, reverse(self.adapter.provider_id + "_callback")
+        )
         provider = self.adapter.get_provider()
         scope = provider.get_scope(request)
 
@@ -192,6 +221,7 @@ class GovBrLoginView(OAuth2LoginView):
             self.adapter.access_token_url,
             callback_url,
             scope,
+            basic_auth=self.adapter.basic_auth,
         )
 
 
@@ -199,13 +229,14 @@ class GovBrCallbackView(OAuth2CallbackView):
     """
     Callback do Gov.br.
 
-    Injeta code_verifier via token_params do cliente para que seja
-    enviado no corpo do POST de troca do código de autorização.
+    Retorna GovBrOAuth2Client com code_verifier recuperado da sessão,
+    que é enviado no corpo do POST de troca do código de autorização.
     """
 
     def get_client(self, request, app):
-        callback_url = reverse(self.adapter.provider_id + "_callback")
-        callback_url = build_absolute_uri(request, callback_url)
+        callback_url = build_absolute_uri(
+            request, reverse(self.adapter.provider_id + "_callback")
+        )
         provider = self.adapter.get_provider()
         scope = provider.get_scope(request)
 
@@ -221,7 +252,8 @@ class GovBrCallbackView(OAuth2CallbackView):
             self.adapter.access_token_url,
             callback_url,
             scope,
-            token_params={"code_verifier": verifier},
+            basic_auth=self.adapter.basic_auth,
+            code_verifier=verifier,
         )
 
 

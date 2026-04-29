@@ -52,7 +52,7 @@ Inclui **vinculação automática de contas por CPF**: um cidadão que já se au
 
 ```bash
 # Clone ou baixe e descompacte o repositório
-git clone https://github.com/seu-org/allauth-govbr.git
+git clone https://github.com/salimsuhet/ALLAUTH-GOVBR.git
 cd allauth-govbr
 
 # Instale em modo editável dentro do virtualenv do GeoNode
@@ -421,12 +421,13 @@ pytest tests/ --cov=allauth_govbr --cov-report=term-missing
 |---------------------|-------------------------------|-----------------------------------------|
 | PKCE                | **Obrigatório** (S256)        | Não usa                                 |
 | `response_type`     | `code`                        | `code id_token`                         |
-| `response_mode`     | —                             | `form_post`                             |
+| `response_mode`     | —                             | `form_post` (POST externo — requer `csrf_exempt` no callback) |
 | `nonce`             | Opcional                      | **Obrigatório**                         |
 | Identificador único | `sub` = CPF                   | `subNovo` (substitui `sub` deprecado)   |
 | Campo nome          | `name`                        | `nome`, `nomeSocial`, `apelido`         |
 | CPF no token        | `sub` (sempre disponível)     | scope `cpf` (aprovação pelo PRODEST)    |
 | Nível de conta      | `reliability_info.level`      | `agentePublico`                         |
+| Autenticação no token endpoint | `Authorization: Basic` (obrigatório) | POST body (padrão OAuth2) |
 
 ---
 
@@ -474,6 +475,33 @@ LOGGING["loggers"]["allauth_govbr"] = {
     "propagate": False,
 }
 ```
+
+### `403 Forbidden` no callback do Acesso Cidadão ES
+
+O `response_mode = form_post` faz o servidor do AC-ES enviar um **POST externo**
+para a URL de callback. O `CsrfViewMiddleware` do Django bloqueia POSTs sem token
+CSRF com 403. A view `AcessoCidadaoCallbackView` já aplica `@csrf_exempt` internamente
+— se você estiver vendo esse erro, verifique se está usando a versão corrigida do
+plugin (commit `d37b9c9` ou posterior).
+
+### `invalid_client` ou `401 Unauthorized` ao trocar o código (Gov.br)
+
+O Gov.br exige `Authorization: Basic base64(client_id:client_secret)` no token
+endpoint e rejeita credenciais enviadas no corpo do POST. O `GovBrOAuth2Adapter`
+define `basic_auth = True`, que ativa esse comportamento no cliente OAuth2 do allauth
+automaticamente. Se ocorrer esse erro, confirme que está na versão corrigida do plugin.
+
+### Login trava após o redirect do Gov.br — `code_verifier não encontrado`
+
+O `code_verifier` do PKCE é armazenado na sessão Django entre o clique em "Entrar com
+Gov.br" e o retorno do callback. Se a sessão expirar ou for perdida (ex.: reinício do
+servidor, cookie inválido, balanceamento de carga sem sticky sessions), o verifier não
+é encontrado e a troca do código falha. Verifique:
+
+1. A sessão está persistente (banco de dados ou Redis), não apenas em memória.
+2. O `SESSION_COOKIE_AGE` é suficiente para o tempo do fluxo OAuth.
+3. Em ambientes com múltiplos workers/pods, o backend de sessão é compartilhado.
+
 
 ---
 

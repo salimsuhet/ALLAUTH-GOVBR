@@ -7,16 +7,15 @@ O Acesso Cidadão ES usa hybrid flow (response_type = "code id_token")
 com nonce obrigatório e response_mode = "form_post".
 NÃO usa PKCE.
 
-Correções aplicadas em relação à versão original:
-  - Bug 1: client.state é uma string CSRF, não um dict — nonce e demais
-    parâmetros do hybrid flow agora são injetados via extra_params em
-    login(), substituindo o uso incorreto de client.state["chave"].
-  - Bug 2: response_mode = "form_post" faz o callback chegar via POST;
-    AcessoCidadaoCallbackView agora sobrescreve dispatch() para aceitar
-    POST e redirecionar os parâmetros para request.GET, onde o allauth
-    os espera.
-  - Bug 3: URLs do adapter eram avaliadas na importação do módulo;
-    agora são propriedades avaliadas em tempo de execução.
+Notas de implementação:
+  - client.state é uma string CSRF, não um dict — nonce e demais
+    parâmetros do hybrid flow são injetados via extra_params em login().
+  - response_mode = "form_post": o servidor de autorização faz POST de
+    volta para o callback URI. O Django bloqueia POSTs externos via CSRF
+    middleware, então AcessoCidadaoCallbackView é marcado como csrf_exempt.
+    O dispatch() também copia request.POST para request.GET para que o
+    OAuth2CallbackView do allauth encontre 'code' e 'state' onde espera.
+  - URLs do adapter: propriedades avaliadas em tempo de execução.
 """
 import logging
 import secrets
@@ -31,6 +30,8 @@ from allauth.socialaccount.providers.oauth2.views import (
 from django.conf import settings
 from django.http import HttpResponseRedirect
 from django.utils.datastructures import QueryDict
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 
 from .provider import AcessoCidadaoProvider
 
@@ -53,7 +54,7 @@ def _aces_base():
 class AcessoCidadaoAdapter(OAuth2Adapter):
     provider_id = AcessoCidadaoProvider.id
 
-    # URLs como propriedades para ler settings em tempo de execução (Bug 3)
+    # URLs como propriedades para ler settings em tempo de execução
     @property
     def access_token_url(self):
         return f"{_aces_base()}/connect/token"
@@ -120,27 +121,34 @@ class AcessoCidadaoLoginView(OAuth2LoginView):
         )
 
 
+@method_decorator(csrf_exempt, name="dispatch")
 class AcessoCidadaoCallbackView(OAuth2CallbackView):
     """
     Callback para o Acesso Cidadão ES com suporte a form_post.
 
-    Quando response_mode = "form_post", o servidor de autorização faz um
-    POST de volta para a redirect_uri com os parâmetros (code, state,
-    id_token) no corpo do formulário — não na query string como no flow
-    padrão (GET). O allauth 0.51.x espera os parâmetros em request.GET,
-    por isso dispatch() copia request.POST para request.GET antes de
-    prosseguir com o processamento normal.
+    Por que csrf_exempt?
+    Quando response_mode = "form_post", o servidor de autorização do
+    Acesso Cidadão ES faz um POST externo de volta para esta URL. Esse
+    POST não carrega o token CSRF do Django, então o CsrfViewMiddleware
+    retornaria 403 Forbidden sem essa isenção.
+
+    Por que copiar POST para GET?
+    OAuth2CallbackView.dispatch() do allauth 0.51.x verifica
+    `if "code" not in request.GET`, então os parâmetros precisam estar
+    em request.GET. O allauth usa get_request_param(), que já verifica
+    request.POST primeiro — mas a guarda inicial usa request.GET
+    diretamente. Copiar garante que ambas as verificações passem.
     """
 
     def dispatch(self, request, *args, **kwargs):
         if request.method == "POST":
             # form_post: parâmetros chegam no corpo; copia para GET para
-            # que o restante do allauth encontre code e state onde espera.
+            # que o OAuth2CallbackView os encontre onde espera.
             mutable = QueryDict(mutable=True)
             mutable.update(request.POST)
             request.GET = mutable
             logger.debug(
-                "[AcessoCidadaoES] Callback recebido via POST (form_post); "
+                "[AcessoCidadaoES] Callback via POST (form_post); "
                 "parâmetros copiados para request.GET."
             )
         return super().dispatch(request, *args, **kwargs)
