@@ -1,8 +1,13 @@
 """
-allauth_govbr.base
+allauth_govbr.base  (GeoNode 5.x / allauth 0.63.x)
 ~~~~~~~~~~~~~~~~~~
-Classes base compartilhadas entre os providers Gov.br (federal)
-e Acesso Cidadão ES (PRODEST).
+Classes base compartilhadas entre os providers Gov.br e Acesso Cidadão ES.
+
+Mudanças em relação ao branch main (allauth 0.51.x):
+  - get_scope(): no allauth 0.63.x, a assinatura é get_scope() sem request.
+    No 0.51.x era get_scope(request). A base GovIdentityProvider não
+    sobrescreve get_scope() — herda a implementação padrão do OAuth2Provider,
+    que lê SCOPE dos settings e chama get_default_scope() como fallback.
 """
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
@@ -22,7 +27,16 @@ class GovIdentityAccount(ProviderAccount):
 class GovIdentityProvider(OAuth2Provider):
     """
     Provider base com lógica comum de extração de campos.
-    Subclasses devem implementar extract_uid e extract_common_fields.
+    Subclasses devem implementar extract_uid, extract_common_fields e
+    extract_extra_data.
+
+    Nota sobre get_scope():
+    No allauth 0.63.x, OAuth2Provider.get_scope() não recebe request:
+        def get_scope(self):
+            settings = self.get_settings()
+            return list(settings.get("SCOPE", self.get_default_scope()))
+    Subclasses devem sobrescrever get_default_scope() para definir o scope
+    padrão quando SCOPE não está nos SOCIALACCOUNT_PROVIDERS settings.
     """
 
     account_class = GovIdentityAccount

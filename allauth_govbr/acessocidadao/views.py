@@ -1,34 +1,29 @@
 """
-allauth_govbr.acessocidadao.views
+allauth_govbr.acessocidadao.views  (GeoNode 5.x / allauth 0.63.x)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Views OAuth2 para o Acesso Cidadão ES (PRODEST).
 
-O Acesso Cidadão ES usa hybrid flow (response_type = "code id_token")
-com nonce obrigatório e response_mode = "form_post".
-NÃO usa PKCE.
+No allauth 0.63.x, o fluxo de login é iniciado por AcessoCidadaoProvider.redirect()
+(sobrescrito em provider.py), que injeta nonce, response_type e response_mode
+automaticamente. Não é necessária uma LoginView customizada.
 
-Notas de implementação:
-  - client.state é uma string CSRF, não um dict — nonce e demais
-    parâmetros do hybrid flow são injetados via extra_params em login().
-  - response_mode = "form_post": o servidor de autorização faz POST de
-    volta para o callback URI. O Django bloqueia POSTs externos via CSRF
-    middleware, então AcessoCidadaoCallbackView é marcado como csrf_exempt.
-    O dispatch() também copia request.POST para request.GET para que o
-    OAuth2CallbackView do allauth encontre 'code' e 'state' onde espera.
-  - URLs do adapter: propriedades avaliadas em tempo de execução.
+O callback ainda precisa de tratamento especial:
+  - csrf_exempt:  response_mode=form_post faz o AC-ES enviar um POST externo
+    para a callback URI. O CsrfViewMiddleware bloquearia esse POST com 403.
+  - POST → GET:   OAuth2CallbackView.dispatch() verifica "code" not in request.GET
+    diretamente. Os parâmetros do form_post chegam em request.POST e precisam
+    ser copiados para request.GET antes do super().dispatch().
+    (get_request_param() já checa POST, mas a guarda inicial usa GET diretamente.)
 """
 import logging
-import secrets
 
 import requests as _requests
-from allauth.socialaccount.models import SocialLogin
 from allauth.socialaccount.providers.oauth2.views import (
     OAuth2Adapter,
     OAuth2CallbackView,
     OAuth2LoginView,
 )
 from django.conf import settings
-from django.http import HttpResponseRedirect
 from django.utils.datastructures import QueryDict
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
@@ -47,14 +42,9 @@ def _aces_base():
     )
 
 
-# ---------------------------------------------------------------------------
-# Adapter
-# ---------------------------------------------------------------------------
-
 class AcessoCidadaoAdapter(OAuth2Adapter):
     provider_id = AcessoCidadaoProvider.id
 
-    # URLs como propriedades para ler settings em tempo de execução
     @property
     def access_token_url(self):
         return f"{_aces_base()}/connect/token"
@@ -80,70 +70,20 @@ class AcessoCidadaoAdapter(OAuth2Adapter):
         return self.get_provider().sociallogin_from_response(request, extra_data)
 
 
-# ---------------------------------------------------------------------------
-# Views
-# ---------------------------------------------------------------------------
-
-class AcessoCidadaoLoginView(OAuth2LoginView):
-    """
-    Sobrescreve login() para configurar o hybrid flow do Acesso Cidadão ES:
-      - response_type = "code id_token"
-      - response_mode = "form_post"
-      - nonce obrigatório (gerado e salvo na sessão)
-
-    Por que login() e não get_client()?
-    No allauth 0.51.x, client.state é None quando get_client() é chamado
-    e só recebe o token CSRF string depois que get_client() retorna.
-    Atribuir client.state["chave"] = valor lança TypeError. A solução é
-    sobrescrever login() e passar os parâmetros como extra_params para
-    client.get_redirect_url().
-    """
-
-    def login(self, request, *args, **kwargs):
-        # Nonce obrigatório — vincula a sessão ao id_token retornado
-        nonce = secrets.token_urlsafe(32)
-        request.session["aces_nonce"] = nonce
-
-        logger.debug("[AcessoCidadaoES] Nonce gerado para a sessão.")
-
-        app = self.adapter.get_app(request)
-        client = self.get_client(request, app)
-        client.state = SocialLogin.stash_state(request)
-
-        extra_params = {
-            "nonce": nonce,
-            "response_type": "code id_token",
-            "response_mode": "form_post",
-        }
-
-        return HttpResponseRedirect(
-            client.get_redirect_url(self.adapter.authorize_url, extra_params)
-        )
-
-
 @method_decorator(csrf_exempt, name="dispatch")
 class AcessoCidadaoCallbackView(OAuth2CallbackView):
     """
     Callback para o Acesso Cidadão ES com suporte a form_post.
 
-    Por que csrf_exempt?
-    Quando response_mode = "form_post", o servidor de autorização do
-    Acesso Cidadão ES faz um POST externo de volta para esta URL. Esse
-    POST não carrega o token CSRF do Django, então o CsrfViewMiddleware
-    retornaria 403 Forbidden sem essa isenção.
+    @csrf_exempt: necessário porque o POST vem de um servidor externo (AC-ES)
+    sem token CSRF do Django.
 
-    Por que copiar POST para GET?
-    OAuth2CallbackView.dispatch() do allauth 0.51.x verifica
-    `if "code" not in request.GET`, então os parâmetros precisam estar
-    em request.GET. O allauth usa get_request_param(), que já verifica
-    request.POST primeiro — mas a guarda inicial usa request.GET
-    diretamente. Copiar garante que ambas as verificações passem.
+    dispatch(): copia request.POST para request.GET quando o método é POST,
+    para que a verificação `"code" not in request.GET` do allauth passe corretamente.
     """
 
     def dispatch(self, request, *args, **kwargs):
         if request.method == "POST":
-            # form_post: parâmetros chegam no corpo; copia para GET para
-            # que o OAuth2CallbackView os encontre onde espera.
             mutable = QueryDict(mutable=True)
             mutable.update(request.POST)
             request.GET = mutable
@@ -154,5 +94,5 @@ class AcessoCidadaoCallbackView(OAuth2CallbackView):
         return super().dispatch(request, *args, **kwargs)
 
 
-oauth2_login = AcessoCidadaoLoginView.adapter_view(AcessoCidadaoAdapter)
+oauth2_login = OAuth2LoginView.adapter_view(AcessoCidadaoAdapter)
 oauth2_callback = AcessoCidadaoCallbackView.adapter_view(AcessoCidadaoAdapter)

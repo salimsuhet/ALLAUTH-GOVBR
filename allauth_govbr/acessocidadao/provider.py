@@ -1,19 +1,18 @@
 """
-allauth_govbr.acessocidadao.provider
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+allauth_govbr.acessocidadao.provider  (GeoNode 5.x / allauth 0.63.x)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Provider OAuth2/OIDC para o Acesso Cidadão ES (PRODEST).
 
-Documentação oficial:
-  https://docs.developer.acessocidadao.es.gov.br/
-
-Características:
-- Hybrid flow: response_type = "code id_token"
-- Nonce obrigatório
-- SEM PKCE
-- UID: campo "subNovo" (substitui "sub" deprecado)
-- Scopes públicos: openid, profile, email, agentepublico
-- Scopes que precisam de aprovação: nome, cpf, dataNascimento, etc.
+Mudanças em relação ao branch main (allauth 0.51.x):
+  - oauth2_adapter_class = AcessoCidadaoAdapter: padrão do allauth 0.63.x.
+  - redirect() sobrescrito para injetar nonce, response_type e response_mode
+    sem precisar de LoginView customizada. O nonce é passado via **kwargs para
+    stash_redirect_state(), ficando disponível no state dict do callback como
+    state["nonce"].
+  - providers.registry.register() mantido.
 """
+import secrets
+
 from allauth.socialaccount import providers
 
 from allauth_govbr.base import GovIdentityAccount, GovIdentityProvider
@@ -36,15 +35,39 @@ class AcessoCidadaoProvider(GovIdentityProvider):
     account_class = AcessoCidadaoAccount
 
     def get_default_scope(self):
-        # Scopes públicos (não precisam de aprovação do PRODEST)
         return ["openid", "profile", "email"]
+
+    def redirect(self, request, process, next_url=None, data=None, **kwargs):
+        """
+        Sobrescreve redirect() para injetar os parâmetros do hybrid flow:
+          - nonce:          obrigatório pelo AC-ES
+          - response_type:  "code id_token" (hybrid flow)
+          - response_mode:  "form_post" (callback via POST)
+
+        O nonce é armazenado no state dict via **kwargs para stash_redirect_state,
+        permitindo validação futura: state["nonce"] == nonce do id_token retornado.
+        """
+        nonce = secrets.token_urlsafe(32)
+
+        # Injeta parâmetros do hybrid flow na URL de autorização
+        auth_params = dict(self.get_auth_params())
+        auth_params.update({
+            "nonce": nonce,
+            "response_type": "code id_token",
+            "response_mode": "form_post",
+        })
+        kwargs["auth_params"] = auth_params
+
+        # Armazena nonce no state dict (via **kwargs → stash_redirect_state)
+        return super().redirect(
+            request, process, next_url=next_url, data=data, nonce=nonce, **kwargs
+        )
 
     def extract_uid(self, data):
         # subNovo é o identificador atual; sub está deprecado
         return str(data.get("subNovo") or data["sub"])
 
     def extract_common_fields(self, data):
-        # Prioriza nome social se disponível
         nome = data.get("nomeSocial") or data.get("nome") or ""
         parts = nome.split(" ")
         return dict(
@@ -56,26 +79,19 @@ class AcessoCidadaoProvider(GovIdentityProvider):
 
     def extract_extra_data(self, data):
         return {
-            # Identificadores
             "sub_novo": data.get("subNovo"),
             "sub_legado": data.get("sub"),
-            # Nome
             "nome": data.get("nome"),
             "nome_civil": data.get("nomeCivil"),
             "nome_social": data.get("nomeSocial"),
             "nome_validado": data.get("nomeValidado"),
             "apelido": data.get("apelido"),
-            # CPF (requer scope aprovado pelo PRODEST)
             "cpf": data.get("cpf"),
-            # Outros dados pessoais (requerem scopes aprovados)
             "data_nascimento": data.get("dataNascimento"),
             "avatar_url": data.get("avatarUrl"),
-            # Papel institucional (scope: agentepublico)
             "agente_publico": data.get("agentePublico"),
-            # Metadado interno
             "provider_source": "acessocidadaoes",
         }
 
 
-# Registro obrigatório para allauth 0.51.x (compatível com GeoNode 4.x)
 providers.registry.register(AcessoCidadaoProvider)

@@ -1,9 +1,17 @@
 """
-allauth_govbr.adapter
-~~~~~~~~~~~~~~~~~~~~~
+allauth_govbr.adapter  (GeoNode 5.x / allauth 0.63.x)
+~~~~~~~~~~~~~~~~~~~~~~
 SocialAccountAdapter com vinculação de contas por CPF.
 
-Compatível com GeoNode 4.x (django-allauth 0.51.x).
+Mudanças em relação ao branch main (allauth 0.51.x):
+  - Herança: DefaultSocialAccountAdapter → geonode.people.adapters.SocialAccountAdapter
+    para herdar a lógica de aprovação de usuários, grupos padrão e outros
+    comportamentos específicos do GeoNode 5.x.
+  - Profile IS o usuário: em GeoNode, Profile(AbstractUser) é o AUTH_USER_MODEL.
+    Não há campo .user — perfil IS o usuário. Corrigido:
+    * perfil.user → perfil
+    * Profile.objects.get(user=...) → Profile.objects.get(pk=sociallogin.user.pk)
+      (ou simplesmente sociallogin.user, que já é uma instância de Profile)
 
 Configuração em local_settings.py:
     SOCIALACCOUNT_ADAPTER = "allauth_govbr.adapter.GovIdentityAccountAdapter"
@@ -11,7 +19,6 @@ Configuração em local_settings.py:
 import logging
 
 from allauth.exceptions import ImmediateHttpResponse
-from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from django.contrib import messages
 from django.db import transaction
 from django.shortcuts import redirect
@@ -21,142 +28,138 @@ from .cpf import cpf_valido, extrair_cpf, mascarar_cpf
 logger = logging.getLogger(__name__)
 
 
-class GovIdentityAccountAdapter(DefaultSocialAccountAdapter):
+class GovIdentityAccountAdapter:
     """
-    Adapter que vincula contas de diferentes provedores gov (Gov.br e
-    Acesso Cidadão ES) ao mesmo usuário GeoNode usando o CPF como chave.
+    Mixin de vinculação por CPF.
 
-    Herda de DefaultSocialAccountAdapter para compatibilidade máxima.
-    Se precisar manter lógicas do GeoNode (aprovação de usuário, grupos
-    padrão), troque a herança:
+    Não herda diretamente aqui para permitir que apps.py injete a herança
+    correta de geonode.people.adapters.SocialAccountAdapter em tempo de
+    carregamento, evitando importações circulares durante o setup do Django.
+    A classe real é construída em apps.py via _build_adapter_class().
+    """
+    pass
 
+
+def _build_adapter_class():
+    """
+    Constrói GovIdentityAccountAdapter herdando de SocialAccountAdapter do GeoNode.
+    Chamado em apps.py após o setup completo do Django para evitar ImportError
+    circular entre geonode.people e allauth_govbr durante INSTALLED_APPS loading.
+    """
+    try:
         from geonode.people.adapters import SocialAccountAdapter as GeoNodeAdapter
-        class GovIdentityAccountAdapter(GeoNodeAdapter): ...
-    """
-
-    # ------------------------------------------------------------------
-    # Hooks principais do allauth
-    # ------------------------------------------------------------------
-
-    def pre_social_login(self, request, sociallogin):
-        """
-        Chamado após autenticação no provider, antes de criar/logar o usuário.
-
-        Fluxo:
-        1. Se a conta social já está conectada a um usuário → passa.
-        2. Extrai e valida o CPF do extra_data.
-        3. Busca Profile com esse CPF no banco.
-        4a. Encontrou → conecta o sociallogin ao usuário existente.
-        4b. Não encontrou → salva CPF normalizado para persistir depois.
-        """
-        # 1. Conta já existente — nada a fazer
-        if sociallogin.is_existing:
-            return
-
-        cpf = extrair_cpf(sociallogin)
-
-        if not cpf:
-            logger.debug(
-                "[GovAdapter] CPF não disponível | provider=%s",
-                sociallogin.account.provider,
-            )
-            return
-
-        if not cpf_valido(cpf):
-            logger.warning(
-                "[GovAdapter] CPF inválido recebido | provider=%s | cpf=%s",
-                sociallogin.account.provider,
-                mascarar_cpf(cpf),
-            )
-            return
-
-        self._vincular_por_cpf(request, sociallogin, cpf)
-
-    def post_social_login(self, request, sociallogin):
-        """
-        Chamado após login/registro social bem-sucedido.
-        Persiste o CPF no Profile se ainda não estiver salvo.
-        """
-        super().post_social_login(request, sociallogin)
-        self._persistir_cpf(sociallogin)
-
-    # ------------------------------------------------------------------
-    # Métodos internos
-    # ------------------------------------------------------------------
-
-    def _vincular_por_cpf(self, request, sociallogin, cpf: str):
-        """
-        Tenta encontrar um Profile pelo CPF e conectar o sociallogin a ele.
-        """
-        from geonode.people.models import Profile
-
-        try:
-            perfil = Profile.objects.get(cpf=cpf)
-        except Profile.DoesNotExist:
-            # Cidadão novo — marca o CPF para ser salvo em post_social_login
-            sociallogin.account.extra_data["_cpf_normalizado"] = cpf
-            logger.debug(
-                "[GovAdapter] CPF não encontrado no DB, novo usuário | cpf=%s",
-                mascarar_cpf(cpf),
-            )
-            return
-        except Profile.MultipleObjectsReturned:
-            logger.error(
-                "[GovAdapter] ERRO: múltiplos profiles com mesmo CPF=%s",
-                mascarar_cpf(cpf),
-            )
-            return
-
-        usuario = perfil.user
-
-        if not usuario.is_active:
-            messages.error(
-                request,
-                "Sua conta está inativa. Entre em contato com o administrador.",
-            )
-            raise ImmediateHttpResponse(redirect("account_login"))
-
-        # Conecta o sociallogin ao usuário encontrado
-        sociallogin.connect(request, usuario)
-
-        logger.info(
-            "[GovAdapter] Conta vinculada por CPF | user=%s | provider=%s | cpf=%s",
-            usuario.username,
-            sociallogin.account.provider,
-            mascarar_cpf(cpf),
+        base = GeoNodeAdapter
+    except ImportError:
+        from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
+        base = DefaultSocialAccountAdapter
+        logger.warning(
+            "[GovAdapter] geonode.people.adapters não disponível; "
+            "usando DefaultSocialAccountAdapter como base."
         )
 
-    def _persistir_cpf(self, sociallogin):
+    class _GovIdentityAccountAdapter(base):
         """
-        Salva o CPF no Profile do usuário, se ainda não estiver preenchido.
-        Usa transaction.atomic() para garantir consistência caso o save falhe.
+        Adapter que vincula contas de diferentes provedores gov ao mesmo
+        usuário GeoNode usando o CPF como chave.
         """
-        cpf = (
-            extrair_cpf(sociallogin)
-            or sociallogin.account.extra_data.get("_cpf_normalizado", "")
-        )
 
-        if not cpf or not cpf_valido(cpf):
-            return
+        def pre_social_login(self, request, sociallogin):
+            if sociallogin.is_existing:
+                return
 
-        from geonode.people.models import Profile
+            cpf = extrair_cpf(sociallogin)
 
-        try:
-            perfil = Profile.objects.get(user=sociallogin.user)
-        except Profile.DoesNotExist:
-            return
+            if not cpf:
+                logger.debug(
+                    "[GovAdapter] CPF não disponível | provider=%s",
+                    sociallogin.account.provider,
+                )
+                return
 
-        if not getattr(perfil, "cpf", None):
+            if not cpf_valido(cpf):
+                logger.warning(
+                    "[GovAdapter] CPF inválido | provider=%s | cpf=%s",
+                    sociallogin.account.provider,
+                    mascarar_cpf(cpf),
+                )
+                return
+
+            self._vincular_por_cpf(request, sociallogin, cpf)
+
+        def post_social_login(self, request, sociallogin):
+            super().post_social_login(request, sociallogin)
+            self._persistir_cpf(sociallogin)
+
+        def _vincular_por_cpf(self, request, sociallogin, cpf: str):
+            from geonode.people.models import Profile
+
             try:
-                with transaction.atomic():
-                    perfil.cpf = cpf
-                    perfil.save(update_fields=["cpf"])
-                logger.info(
-                    "[GovAdapter] CPF persistido no Profile | user=%s",
-                    sociallogin.user.username,
+                # Profile IS o usuário (Profile extends AbstractUser)
+                perfil = Profile.objects.get(cpf=cpf)
+            except Profile.DoesNotExist:
+                sociallogin.account.extra_data["_cpf_normalizado"] = cpf
+                logger.debug(
+                    "[GovAdapter] CPF não encontrado no DB | cpf=%s",
+                    mascarar_cpf(cpf),
                 )
-            except Exception:
-                logger.exception(
-                    "[GovAdapter] Erro ao persistir CPF | user=%s",
-                    sociallogin.user.username,
+                return
+            except Profile.MultipleObjectsReturned:
+                logger.error(
+                    "[GovAdapter] Múltiplos profiles com CPF=%s",
+                    mascarar_cpf(cpf),
                 )
+                return
+
+            # perfil IS o usuário — sem campo .user separado
+            usuario = perfil
+
+            if not usuario.is_active:
+                messages.error(
+                    request,
+                    "Sua conta está inativa. Entre em contato com o administrador.",
+                )
+                raise ImmediateHttpResponse(redirect("account_login"))
+
+            sociallogin.connect(request, usuario)
+
+            logger.info(
+                "[GovAdapter] Conta vinculada por CPF | user=%s | provider=%s | cpf=%s",
+                usuario.username,
+                sociallogin.account.provider,
+                mascarar_cpf(cpf),
+            )
+
+        def _persistir_cpf(self, sociallogin):
+            cpf = (
+                extrair_cpf(sociallogin)
+                or sociallogin.account.extra_data.get("_cpf_normalizado", "")
+            )
+
+            if not cpf or not cpf_valido(cpf):
+                return
+
+            # sociallogin.user já é uma instância de Profile (Profile IS o usuário)
+            perfil = sociallogin.user
+
+            if not getattr(perfil, "cpf", None):
+                try:
+                    with transaction.atomic():
+                        perfil.cpf = cpf
+                        perfil.save(update_fields=["cpf"])
+                    logger.info(
+                        "[GovAdapter] CPF persistido | user=%s",
+                        sociallogin.user.username,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[GovAdapter] Erro ao persistir CPF | user=%s",
+                        sociallogin.user.username,
+                    )
+
+    return _GovIdentityAccountAdapter
+
+
+# Instanciada em apps.py após Django setup; referenciada aqui como proxy
+# para que SOCIALACCOUNT_ADAPTER = "allauth_govbr.adapter.GovIdentityAccountAdapter"
+# funcione normalmente.
+GovIdentityAccountAdapter = None  # será substituído em apps.py

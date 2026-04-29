@@ -1,14 +1,21 @@
 """
-allauth_govbr.govbr.provider
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+allauth_govbr.govbr.provider  (GeoNode 5.x / allauth 0.63.x)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Provider OAuth2/OIDC para o Login Único Gov.br (federal).
 
-Características:
-- PKCE obrigatório (S256)
-- Sub pairwise (o sub é o CPF do cidadão)
-- Scopes: openid, email, profile, govbr_confiabilidades
+Mudanças em relação ao branch main (allauth 0.51.x):
+  - pkce_enabled_default = True: ativa PKCE nativo do allauth 0.63.x.
+    O Gov.br exige S256, que é o único método suportado por generate_code_challenge().
+    Ao ativar pkce_enabled_default, o provider.redirect() chama get_pkce_params()
+    automaticamente, armazena code_verifier no state dict e passa para
+    get_access_token() no callback — sem código manual.
+  - oauth2_adapter_class = GovBrOAuth2Adapter: padrão do allauth 0.63.x para
+    conectar provider ao adapter sem precisar de views customizadas.
+  - providers.registry.register() ainda funciona via importação automática do
+    módulo pelo ProviderRegistry.load() — mantido para compatibilidade.
 """
 from allauth.socialaccount import providers
+from allauth.socialaccount.providers.oauth2.utils import generate_code_challenge
 
 from allauth_govbr.base import GovIdentityAccount, GovIdentityProvider
 
@@ -22,6 +29,18 @@ class GovBrProvider(GovIdentityProvider):
     id = "govbr"
     name = "Gov.br"
     account_class = GovBrAccount
+
+    # PKCE é obrigatório no Gov.br. pkce_enabled_default = True garante que
+    # get_pkce_params() sempre retorna o challenge, independente de OAUTH_PKCE_ENABLED.
+    pkce_enabled_default = True
+
+    def get_pkce_params(self):
+        """
+        Sobrescreve para sempre gerar PKCE (não condicional ao setting).
+        Gov.br exige PKCE em todos os fluxos — não é opcional.
+        generate_code_challenge() do allauth já retorna S256.
+        """
+        return generate_code_challenge()
 
     def get_default_scope(self):
         return ["openid", "email", "profile"]
@@ -42,23 +61,17 @@ class GovBrProvider(GovIdentityProvider):
 
     def extract_extra_data(self, data):
         return {
-            # CPF — no Gov.br, o sub é o CPF
             "cpf": data.get("sub"),
-            # Identificação
             "name": data.get("name"),
             "picture": data.get("picture"),
             "social_name": data.get("social_name"),
             "preferred_username": data.get("preferred_username"),
-            # Confiabilidade (escopo govbr_confiabilidades)
             "reliability": data.get("reliability_info", {}),
-            # Métodos de autenticação usados (ex: ["passwd", "x509"])
             "amr": data.get("amr", []),
-            # Contato
             "phone_number": data.get("phone_number"),
-            # Metadado interno
             "provider_source": "govbr",
         }
 
 
-# Registro obrigatório para allauth 0.51.x (compatível com GeoNode 4.x)
+# Registro via importação automática pelo ProviderRegistry.load()
 providers.registry.register(GovBrProvider)

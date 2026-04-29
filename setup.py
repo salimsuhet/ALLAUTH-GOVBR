@@ -1,32 +1,35 @@
-from setuptools import find_packages, setup
+from setuptools import setup, find_packages
 
 setup(
     name="allauth-govbr",
-    version="1.0.0",
-    description="Plugin django-allauth para Login Gov.br e Acesso Cidadão ES (GeoNode 4.x)",
+    version="0.2.0",
+    description="Plugin django-allauth para Login Gov.br e Acesso Cidadão ES — GeoNode 5.x / allauth 0.63.x",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    author="CLAUDE.AI",
-    url="https://github.com/seu-org/allauth-govbr",
+    author="SECTI-ES",
+    url="https://github.com/salimsuhet/ALLAUTH-GOVBR",
     license="MIT",
     packages=find_packages(exclude=["tests*", "docs*"]),
-    include_package_data=True,
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=[
-        # Compatível com GeoNode 4.x
-        "django-allauth>=0.51.0,<0.57.0",
+        "django>=4.2",
+        "django-allauth>=0.63.0,<0.64.0",
         "requests>=2.28",
     ],
     extras_require={
         "dev": [
-            "pytest>=7.0",
+            "pytest",
             "pytest-django",
+            "pytest-cov",
         ]
     },
     classifiers=[
         "Framework :: Django",
-        "Programming Language :: Python :: 3",
+        "Framework :: Django :: 4.2",
+        "Framework :: Django :: 5.2",
+        "Intended Audience :: Developers",
         "License :: OSI Approved :: MIT License",
-        "Topic :: Internet :: WWW/HTTP :: Session",
+        "Programming Language :: Python :: 3",
+        "Topic :: Internet :: WWW/HTTP",
     ],
 )

@@ -1,7 +1,12 @@
 """
-allauth_govbr.extractors
-~~~~~~~~~~~~~~~~~~~~~~~~
-ProfileExtractors para o GeoNode 4.x.
+allauth_govbr.extractors  (GeoNode 5.x / allauth 0.63.x)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+ProfileExtractors para o GeoNode 5.x.
+
+Mudanças em relação ao branch main (allauth 0.51.x / GeoNode 4.x):
+  - extract_email_address → extract_email  (renomeado no GeoNode 5.x BaseExtractor)
+  - extract_phone         → extract_voice  (renomeado no GeoNode 5.x BaseExtractor)
+  - extract_zip_code      → extract_zipcode (renomeado no GeoNode 5.x BaseExtractor)
 
 Configuração em local_settings.py:
     SOCIALACCOUNT_PROFILE_EXTRACTORS = {
@@ -13,11 +18,8 @@ Configuração em local_settings.py:
 
 class GovBrExtractor:
     """
-    Extrai campos do perfil recebido do endpoint /userinfo do Gov.br federal.
-
-    Campos disponíveis (dependem dos scopes solicitados):
-        sub, name, email, preferred_username, picture,
-        social_name, reliability_info, amr, phone_number
+    Extrai campos do /userinfo do Gov.br federal.
+    Implementa a interface BaseExtractor do GeoNode 5.x.
     """
 
     def extract_area(self, data):
@@ -32,7 +34,7 @@ class GovBrExtractor:
     def extract_delivery(self, data):
         return None
 
-    def extract_email_address(self, data):
+    def extract_email(self, data):
         return data.get("email", "")
 
     def extract_fax(self, data):
@@ -49,7 +51,7 @@ class GovBrExtractor:
     def extract_organization(self, data):
         return None
 
-    def extract_phone(self, data):
+    def extract_voice(self, data):
         return data.get("phone_number", "")
 
     def extract_profile(self, data):
@@ -58,18 +60,14 @@ class GovBrExtractor:
     def extract_position(self, data):
         return None
 
-    def extract_zip_code(self, data):
+    def extract_zipcode(self, data):
         return None
 
 
 class AcessoCidadaoExtractor:
     """
-    Extrai campos do perfil recebido do endpoint /connect/userinfo
-    do Acesso Cidadão ES (PRODEST).
-
-    Campos disponíveis (dependem dos scopes aprovados):
-        sub, subNovo, nome, nomeSocial, nomeCivil, apelido,
-        email, cpf, dataNascimento, agentePublico, avatarUrl
+    Extrai campos do /connect/userinfo do Acesso Cidadão ES (PRODEST).
+    Implementa a interface BaseExtractor do GeoNode 5.x.
     """
 
     def extract_area(self, data):
@@ -84,14 +82,13 @@ class AcessoCidadaoExtractor:
     def extract_delivery(self, data):
         return None
 
-    def extract_email_address(self, data):
+    def extract_email(self, data):
         return data.get("email", "")
 
     def extract_fax(self, data):
         return None
 
     def extract_first_name(self, data):
-        # Prioriza nome social se disponível
         nome = data.get("nomeSocial") or data.get("nome") or ""
         parts = nome.split(" ")
         return parts[0] if parts else ""
@@ -104,7 +101,7 @@ class AcessoCidadaoExtractor:
     def extract_organization(self, data):
         return None
 
-    def extract_phone(self, data):
+    def extract_voice(self, data):
         return None
 
     def extract_profile(self, data):
@@ -113,5 +110,5 @@ class AcessoCidadaoExtractor:
     def extract_position(self, data):
         return None
 
-    def extract_zip_code(self, data):
+    def extract_zipcode(self, data):
         return None

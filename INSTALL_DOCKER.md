@@ -1,4 +1,8 @@
-# Instalação do allauth-govbr no GeoNode 4 via Docker
+# Instalação do allauth-govbr no GeoNode 5.x via Docker (geonode-cluster)
+
+> **Branch:** `geonode-5.0.x` — compatível com GeoNode 5.0.2, Django 5.2, allauth 0.63.x.
+> Para GeoNode 4.4.x use o branch `main` e consulte o `INSTALL_DOCKER.md` daquele branch.
+
 
 Este guia descreve como instalar o plugin
 [allauth-govbr](https://github.com/salimsuhet/ALLAUTH-GOVBR) em uma instalação
@@ -71,8 +75,8 @@ Nos comandos a seguir, substitua `meu_geonode` pelo nome real do seu projeto.
 Abra o arquivo `src/requirements.txt` e adicione a linha do plugin:
 
 ```txt
-# allauth-govbr — Login Gov.br e Acesso Cidadão ES
-git+https://github.com/salimsuhet/ALLAUTH-GOVBR.git#egg=allauth-govbr
+# allauth-govbr — Login Gov.br e Acesso Cidadão ES (branch geonode-5.0.x)
+git+https://github.com/salimsuhet/ALLAUTH-GOVBR.git@geonode-5.0.x#egg=allauth-govbr
 ```
 
 > Isso instrui o pip a instalar o pacote diretamente do repositório GitHub
