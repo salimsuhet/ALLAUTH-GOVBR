@@ -13,6 +13,7 @@ import logging
 from allauth.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from django.contrib import messages
+from django.db import transaction
 from django.shortcuts import redirect
 
 from .cpf import cpf_valido, extrair_cpf, mascarar_cpf
@@ -128,6 +129,7 @@ class GovIdentityAccountAdapter(DefaultSocialAccountAdapter):
     def _persistir_cpf(self, sociallogin):
         """
         Salva o CPF no Profile do usuário, se ainda não estiver preenchido.
+        Usa transaction.atomic() para garantir consistência caso o save falhe.
         """
         cpf = (
             extrair_cpf(sociallogin)
@@ -145,9 +147,16 @@ class GovIdentityAccountAdapter(DefaultSocialAccountAdapter):
             return
 
         if not getattr(perfil, "cpf", None):
-            perfil.cpf = cpf
-            perfil.save(update_fields=["cpf"])
-            logger.info(
-                "[GovAdapter] CPF persistido no Profile | user=%s",
-                sociallogin.user.username,
-            )
+            try:
+                with transaction.atomic():
+                    perfil.cpf = cpf
+                    perfil.save(update_fields=["cpf"])
+                logger.info(
+                    "[GovAdapter] CPF persistido no Profile | user=%s",
+                    sociallogin.user.username,
+                )
+            except Exception:
+                logger.exception(
+                    "[GovAdapter] Erro ao persistir CPF | user=%s",
+                    sociallogin.user.username,
+                )
